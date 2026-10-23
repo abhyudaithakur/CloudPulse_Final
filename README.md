@@ -119,7 +119,7 @@ Windows walkthrough, including the live demo script, is in [SETUP_WINDOWS.md](SE
 
 ```bash
 git clone https://github.com/abhyudaithakur/CloudPulse_Final.git
-cd CloudPulse
+cd CloudPulse_Final
 docker compose up --build -d
 ```
 

@@ -1,0 +1,81 @@
+# The dashboard image's Nginx config re-resolves "api" through Docker's DNS, which does not exist
+# in Kubernetes. Here the API is a Service with a stable address, so a static proxy_pass is enough.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dashboard-nginx
+  namespace: cloudpulse
+data:
+  default.conf: |
+    server {
+      listen 80;
+      server_name _;
+      root /usr/share/nginx/html;
+      index index.html;
+
+      location /api/ {
+        proxy_pass http://cloudpulse-api.cloudpulse.svc.cluster.local:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 10s;
+      }
+
+      location /assets/ {
+        add_header Cache-Control "public, max-age=31536000, immutable";
+        try_files $uri =404;
+      }
+
+      location / {
+        add_header Cache-Control "no-cache";
+        try_files $uri $uri/ /index.html;
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dashboard
+  namespace: cloudpulse
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dashboard
+  template:
+    metadata:
+      labels:
+        app: dashboard
+    spec:
+      containers:
+        - name: dashboard
+          image: cloudpulse/dashboard:local
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet: { path: /, port: 80 }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 20m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          volumeMounts:
+            - name: nginx
+              mountPath: /etc/nginx/conf.d
+      volumes:
+        - name: nginx
+          configMap:
+            name: dashboard-nginx
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dashboard
+  namespace: cloudpulse
+spec:
+  type: NodePort
+  selector:
+    app: dashboard
+  ports:
+    - port: 80
+      targetPort: 80
+      nodePort: 30080

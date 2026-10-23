@@ -1,0 +1,28 @@
+# Dependencies and build output
+node_modules/
+.npm-cache/
+.downloads/
+dist/
+target/
+*.tsbuildinfo
+
+# Test output
+frontend/test-results/
+e2e-results/
+e2e-k8s-results/
+traceability.md
+
+# kind/kubectl downloaded by scripts/k8s-up.ps1
+.tools/
+
+# Local configuration and logs
+.env
+*.log
+
+# IDE / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+__pycache__/

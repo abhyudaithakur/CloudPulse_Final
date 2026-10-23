@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudpulse-api
+  namespace: cloudpulse
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cloudpulse-api
+  template:
+    metadata:
+      labels:
+        app: cloudpulse-api
+    spec:
+      serviceAccountName: cloudpulse-api
+      terminationGracePeriodSeconds: 20
+      containers:
+        - name: api
+          image: cloudpulse/api:local
+          imagePullPolicy: Never
+          env:
+            - { name: SPRING_DATASOURCE_URL, value: "jdbc:postgresql://postgres:5432/cloudpulse" }
+            - name: SPRING_DATASOURCE_USERNAME
+              valueFrom: { secretKeyRef: { name: postgres, key: POSTGRES_USER } }
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom: { secretKeyRef: { name: postgres, key: POSTGRES_PASSWORD } }
+            - { name: PROMETHEUS_URL, value: "http://prometheus:9090" }
+            - { name: PROMETHEUS_UI_URL, value: "http://localhost:30090" }
+            - { name: CHECKOUT_URL, value: "http://checkout-api.cloudpulse-demo.svc:8081" }
+            - { name: PAYMENT_URL, value: "http://payment-api.cloudpulse-demo.svc:8082" }
+            # Guarded remediation: on, limited to this namespace and to the RBAC in rbac.yaml.
+            - { name: REMEDIATION_ENABLED, value: "true" }
+            - { name: REMEDIATION_NAMESPACE, value: cloudpulse-demo }
+            - { name: REMEDIATION_ROLLOUT_TIMEOUT, value: 180s }
+            - { name: REMEDIATION_VERIFICATION_WINDOW, value: 150s }
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: 8080 }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8080 }
+            initialDelaySeconds: 60
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 200m, memory: 384Mi }
+            limits: { memory: 768Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cloudpulse-api
+  namespace: cloudpulse
+spec:
+  selector:
+    app: cloudpulse-api
+  ports:
+    - port: 8080
+      targetPort: 8080

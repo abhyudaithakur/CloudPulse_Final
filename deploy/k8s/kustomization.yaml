@@ -1,0 +1,21 @@
+# CloudPulse in Kubernetes mode: kubectl apply -k deploy/k8s
+#
+#   namespace cloudpulse       CloudPulse itself: API, dashboard, PostgreSQL, Prometheus
+#   namespace cloudpulse-demo  the monitored workloads: checkout-api, payment-api, traffic
+#
+# The API's service account may get and patch exactly two deployments in cloudpulse-demo and
+# nothing else (rbac.yaml). That is the whole blast radius of an approved remediation.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespaces.yaml
+  - postgres.yaml
+  - prometheus.yaml
+  - demo-services.yaml
+  - rbac.yaml
+  - api.yaml
+  - dashboard.yaml
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: cloudpulse
+    includeSelectors: false

@@ -1,0 +1,85 @@
+# Regenerates the README screenshots from the real running stack (not mock data) and commits
+# them to the branch that triggered the run. Push to a `ci/screenshots` branch, or run manually.
+name: Refresh README screenshots
+
+on:
+  push:
+    branches: ["ci/screenshots"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  screenshots:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - name: Start the stack
+        run: |
+          # Image builds download Maven and npm dependencies; retry if a registry rate-limits us (HTTP 429).
+          for attempt in 1 2 3; do
+            docker compose build 2>&1 | tee compose-up.log && [ "${PIPESTATUS[0]}" = 0 ] && break
+            [ "$attempt" = 3 ] && exit 1
+            echo "Image build failed (attempt $attempt); retrying in $((attempt * 60)) s"; sleep $((attempt * 60))
+          done
+          docker compose up -d --wait --wait-timeout 300 2>&1 | tee -a compose-up.log; exit "${PIPESTATUS[0]}"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install Playwright
+        run: |
+          python -m pip install --quiet playwright==1.56.0
+          python -m playwright install --with-deps chromium
+      - name: Run the scenarios and capture screenshots
+        run: python e2e/smoke_test.py --screenshots --out e2e-results 2>&1 | tee e2e.log; exit "${PIPESTATUS[0]}"
+      - name: Install kind and kubectl if the runner lacks them
+        run: |
+          if ! command -v kind >/dev/null; then
+            curl -fsSLo /tmp/kind https://kind.sigs.k8s.io/dl/v0.29.0/kind-linux-amd64 && sudo install /tmp/kind /usr/local/bin/kind
+          fi
+          if ! command -v kubectl >/dev/null; then
+            curl -fsSLo /tmp/kubectl https://dl.k8s.io/release/v1.33.1/bin/linux/amd64/kubectl && sudo install /tmp/kubectl /usr/local/bin/kubectl
+          fi
+      - name: Switch to Kubernetes mode and capture the guarded restart
+        run: |
+          docker compose down -v
+          for attempt in 1 2 3; do
+            ./scripts/k8s-up.sh 2>&1 | tee k8s-up.log && [ "${PIPESTATUS[0]}" = 0 ] && break
+            [ "$attempt" = 3 ] && exit 1
+            sleep $((attempt * 60))
+          done
+          python e2e/k8s_test.py --screenshots --out e2e-k8s-results 2>&1 | tee k8s.log; exit "${PIPESTATUS[0]}"
+      - name: Commit screenshots
+        run: |
+          mkdir -p docs/images
+          cp e2e-results/screenshots/02-overview-incident.png docs/images/overview-incident.png
+          cp e2e-results/screenshots/03-incident-detail.png docs/images/incident-detail.png
+          cp e2e-results/screenshots/04-overview-telemetry-unavailable.png docs/images/telemetry-unknown.png
+          cp e2e-results/screenshots/06-activity.png docs/images/activity.png
+          cp e2e-results/screenshots/07-probable-source.png docs/images/probable-source.png
+          cp e2e-k8s-results/screenshots/k8s-03-remediation-recovered.png docs/images/remediation-recovered.png
+          { cat e2e-results/summary.md; echo; cat e2e-k8s-results/summary.md; } > docs/images/measurements.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/images
+          git commit -m "docs: refresh screenshots from the running stack" || echo "no changes"
+          git push
+      - name: Explain failure
+        if: failure()
+        run: |
+          docker compose logs --no-color --tail 60 api > api-tail.log || true
+          python3 scripts/ci/annotate.py compose-up.log --title "Stack start"
+          python3 scripts/ci/annotate.py e2e.log --title "System test"
+          python3 scripts/ci/annotate.py api-tail.log --title "API log tail" --notice
+          python3 scripts/ci/annotate.py k8s.log --title "Kubernetes test" || true
+      - name: Stop the stack
+        if: always()
+        run: |
+          docker compose down -v || true
+          kind delete cluster --name cloudpulse || true

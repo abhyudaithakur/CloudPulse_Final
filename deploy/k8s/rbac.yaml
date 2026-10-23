@@ -1,0 +1,39 @@
+# Least privilege for remediation (NFR-03). The CloudPulse API runs as this service account. It
+# may read and patch two named deployments in cloudpulse-demo, which is exactly what a rolling
+# restart needs (the same PATCH `kubectl rollout restart` sends). It cannot delete, scale through
+# other resources, read secrets, exec into pods, or touch any other namespace, including its own.
+#
+# Check it yourself:
+#   kubectl auth can-i patch deployment/payment-api -n cloudpulse-demo --as=system:serviceaccount:cloudpulse:cloudpulse-api   # yes
+#   kubectl auth can-i delete deployment/payment-api -n cloudpulse-demo --as=system:serviceaccount:cloudpulse:cloudpulse-api  # no
+#   kubectl auth can-i patch deployment/cloudpulse-api -n cloudpulse --as=system:serviceaccount:cloudpulse:cloudpulse-api     # no
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cloudpulse-api
+  namespace: cloudpulse
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cloudpulse-remediator
+  namespace: cloudpulse-demo
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["checkout-api", "payment-api"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cloudpulse-remediator
+  namespace: cloudpulse-demo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cloudpulse-remediator
+subjects:
+  - kind: ServiceAccount
+    name: cloudpulse-api
+    namespace: cloudpulse

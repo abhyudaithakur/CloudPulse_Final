@@ -1,0 +1,24 @@
+# Docker Compose scrape configuration. (Kubernetes uses deploy/k8s/prometheus.yml, which finds
+# pods by label, so the job names and the queries are the same in both modes.)
+global:
+  scrape_interval: 5s
+  scrape_timeout: 4s
+  evaluation_interval: 5s
+
+scrape_configs:
+  # The monitored services. Job name = service name, so `up{job="checkout-api"}` means that service.
+  - job_name: checkout-api
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["checkout-api:8081"]
+
+  - job_name: payment-api
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["payment-api:8082"]
+
+  # CloudPulse itself: evaluations, query latency, incidents opened, detection delay.
+  - job_name: cloudpulse-api
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["api:8080"]

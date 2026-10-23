@@ -1,0 +1,56 @@
+# Regenerates frontend/package-lock.json in a clean environment and commits it to the branch
+# that triggered the run. Push to a `ci/lockfile` branch after changing package.json, or run manually.
+name: Regenerate dashboard lockfile
+
+on:
+  push:
+    branches: ["ci/lockfile"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  lockfile:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+      - name: Resolve dependencies
+        working-directory: frontend
+        run: |
+          # Node 24 ships npm 11; npm 10's resolver crashes on this tree ("reading 'edgesOut'").
+          npm --version
+          rm -rf package-lock.json node_modules
+          npm install --ignore-scripts --no-audit --no-fund 2>&1 | tee ../lockfile.log
+          status="${PIPESTATUS[0]}"
+          if [ "$status" != 0 ]; then
+            grep -hE "verbose stack|error" ~/.npm/_logs/*.log | tail -40 >> ../lockfile.log || true
+          fi
+          exit "$status"
+      - name: Report resolved versions
+        working-directory: frontend
+        run: |
+          node -e '
+            const lock = require("./package-lock.json");
+            const pkg = require("./package.json");
+            const names = [...Object.keys(pkg.dependencies || {}), ...Object.keys(pkg.devDependencies || {})];
+            const lines = names.map((n) => `${n} ${lock.packages["node_modules/" + n]?.version}`);
+            console.log("::notice title=Resolved versions::" + lines.join("%0A"));
+          '
+      - name: Explain failure
+        if: failure()
+        run: python3 scripts/ci/annotate.py lockfile.log --title "Lockfile"
+      - name: Commit the lockfile
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add frontend/package-lock.json
+          git commit -m "build(dashboard): regenerate package-lock.json" || echo "no changes"
+          git push

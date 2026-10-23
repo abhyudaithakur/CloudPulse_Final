@@ -1,0 +1,14 @@
+# Local Kubernetes cluster for CloudPulse's Kubernetes mode (kind: Kubernetes in Docker).
+# Two NodePorts are published on the host: the dashboard and Prometheus.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: cloudpulse
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30080 # dashboard  -> http://localhost:30080
+        hostPort: 30080
+        protocol: TCP
+      - containerPort: 30090 # Prometheus -> http://localhost:30090
+        hostPort: 30090
+        protocol: TCP

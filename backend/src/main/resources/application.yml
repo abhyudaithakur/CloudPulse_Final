@@ -1,0 +1,106 @@
+server:
+  port: 8080
+  shutdown: graceful
+
+spring:
+  application:
+    name: cloudpulse-api
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/cloudpulse}
+    username: ${SPRING_DATASOURCE_USERNAME:cloudpulse}
+    password: ${SPRING_DATASOURCE_PASSWORD:cloudpulse_local}
+  jpa:
+    open-in-view: false
+    hibernate:
+      # Flyway owns the schema (src/main/resources/db/migration).
+      ddl-auto: none
+  task:
+    scheduling:
+      # Detection (every 5 s) and remediation (every 2 s) must not wait on each other.
+      pool:
+        size: 2
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+cloudpulse:
+  scheduling:
+    enabled: true
+    interval-ms: ${DETECTION_INTERVAL_MS:5000}
+    initial-delay-ms: 3000
+  detection:
+    # Usable samples further apart than this break a sustain/recovery window.
+    max-sample-gap: 20s
+    # How often an ongoing breach appends a SAMPLE evidence row.
+    evidence-sample-interval: 30s
+    # A dependency's problem that starts at most this much later still counts as the probable source.
+    correlation-tolerance: 30s
+  prometheus:
+    url: ${PROMETHEUS_URL:http://localhost:9090}
+    # Where a person's browser opens Prometheus (Compose: 9090, Kubernetes NodePort: 30090).
+    ui-url: ${PROMETHEUS_UI_URL:http://localhost:9090}
+    connect-timeout: 2s
+    read-timeout: 3s
+  # Monitored services and the dependency map (FR-01, FR-08). checkout-api calls payment-api.
+  services:
+    - name: checkout-api
+      url: ${CHECKOUT_URL:http://localhost:8081}
+      depends-on: [payment-api]
+      deployment: checkout-api
+    - name: payment-api
+      url: ${PAYMENT_URL:http://localhost:8082}
+      depends-on: []
+      deployment: payment-api
+  # Deterministic rules (FR-02), applied to every service; {service} is replaced by its name.
+  # Each query must aggregate to a single series.
+  rule-templates:
+    - id: LATENCY_P95_SUSTAINED
+      title: Sustained high request latency
+      query: 'histogram_quantile(0.95, sum by (le) (rate(http_server_requests_seconds_bucket{application="{service}",uri="/api/work"}[1m])))'
+      comparison: ABOVE
+      threshold: ${DETECTION_THRESHOLD_SECONDS:1.0}
+      unit: SECONDS
+      sustain: ${DETECTION_SUSTAIN_SECONDS:30}
+      recovery: ${DETECTION_RECOVERY_SECONDS:10}
+      severity:
+        high-ratio: 1.5
+        critical-ratio: 2.0
+    - id: ERROR_RATE_SUSTAINED
+      title: Sustained HTTP 5xx error rate
+      # "or vector(0)" makes zero errors read as 0 %, not "no data"; no traffic at all is still no data.
+      query: '(sum(rate(http_server_requests_seconds_count{application="{service}",uri="/api/work",status=~"5.."}[1m])) or vector(0)) / sum(rate(http_server_requests_seconds_count{application="{service}",uri="/api/work"}[1m]))'
+      comparison: ABOVE
+      threshold: ${ERROR_RATE_THRESHOLD:0.05}
+      unit: RATIO
+      sustain: ${DETECTION_SUSTAIN_SECONDS:30}
+      recovery: ${DETECTION_RECOVERY_SECONDS:10}
+      severity:
+        high-ratio: 2.0
+        critical-ratio: 4.0
+    - id: TARGET_AVAILABILITY
+      title: Service unreachable by Prometheus
+      query: 'min(up{job="{service}"})'
+      comparison: BELOW
+      threshold: 1
+      unit: BOOLEAN
+      sustain: ${AVAILABILITY_SUSTAIN_SECONDS:15}
+      recovery: ${DETECTION_RECOVERY_SECONDS:10}
+      severity:
+        fixed: CRITICAL
+  # Guarded Kubernetes remediation (FR-10 to FR-12). Off in Docker Compose; the Kubernetes
+  # manifests turn it on and give the API a service account limited to the demo namespace.
+  remediation:
+    enabled: ${REMEDIATION_ENABLED:false}
+    namespace: ${REMEDIATION_NAMESPACE:cloudpulse-demo}
+    rollout-timeout: ${REMEDIATION_ROLLOUT_TIMEOUT:180s}
+    verification-window: ${REMEDIATION_VERIFICATION_WINDOW:150s}
+    kubernetes:
+      api-url: ${KUBERNETES_API_URL:https://kubernetes.default.svc}
+      timeout: 5s

@@ -1,0 +1,113 @@
+# CloudPulse on one laptop: two instrumented demo services (checkout-api calls payment-api),
+# synthetic traffic, Prometheus, PostgreSQL, the CloudPulse API and the dashboard.
+# Start: docker compose up --build -d     Dashboard: http://localhost:3000
+# In this mode CloudPulse detects and explains; restarts (remediation) need the Kubernetes mode.
+
+x-demo-service: &demo-service
+  build: ./demo-service
+  image: cloudpulse/demo-service:local
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/$${SERVER_PORT} && printf 'GET /actuator/health/readiness HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
+    interval: 5s
+    timeout: 3s
+    retries: 30
+    start_period: 10s
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: cloudpulse
+      POSTGRES_USER: cloudpulse
+      POSTGRES_PASSWORD: cloudpulse_local
+    ports: ["5432:5432"]
+    volumes: ["cloudpulse-pg:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cloudpulse -d cloudpulse"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    ports: ["9090:9090"]
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=2d"]
+
+  # Leaf service: does its own work and calls nothing.
+  payment-api:
+    <<: *demo-service
+    ports: ["8082:8082"]
+    environment:
+      SERVER_PORT: 8082
+      SERVICE_NAME: payment-api
+
+  # Entry service: does its own work, then calls payment-api. A payment problem shows up here too.
+  checkout-api:
+    <<: *demo-service
+    ports: ["8081:8081"]
+    environment:
+      SERVER_PORT: 8081
+      SERVICE_NAME: checkout-api
+      DOWNSTREAM_URL: http://payment-api:8082
+      DOWNSTREAM_NAME: payment-api
+    depends_on:
+      payment-api: { condition: service_started }
+
+  api:
+    build: ./backend
+    image: cloudpulse/api:local
+    ports: ["8080:8080"]
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/cloudpulse
+      SPRING_DATASOURCE_USERNAME: cloudpulse
+      SPRING_DATASOURCE_PASSWORD: cloudpulse_local
+      PROMETHEUS_URL: http://prometheus:9090
+      PROMETHEUS_UI_URL: http://localhost:9090
+      CHECKOUT_URL: http://checkout-api:8081
+      PAYMENT_URL: http://payment-api:8082
+      # Rule configuration (NFR-10): change behaviour without changing code.
+      DETECTION_INTERVAL_MS: 5000
+      DETECTION_THRESHOLD_SECONDS: 1.0
+      ERROR_RATE_THRESHOLD: 0.05
+      DETECTION_SUSTAIN_SECONDS: 30
+      AVAILABILITY_SUSTAIN_SECONDS: 15
+      DETECTION_RECOVERY_SECONDS: 10
+      # Docker Compose has no cluster to change: remediation is shown but refused.
+      REMEDIATION_ENABLED: "false"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /actuator/health/readiness HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
+      interval: 5s
+      timeout: 3s
+      retries: 40
+      start_period: 15s
+    depends_on:
+      postgres: { condition: service_healthy }
+      prometheus: { condition: service_started }
+      checkout-api: { condition: service_started }
+      payment-api: { condition: service_started }
+
+  traffic-generator:
+    build: ./traffic-generator
+    image: cloudpulse/traffic-generator:local
+    environment:
+      TARGET_URL: http://checkout-api:8081/api/work
+      REQUESTS_PER_SECOND: 4
+    depends_on:
+      checkout-api: { condition: service_started }
+    restart: unless-stopped
+
+  dashboard:
+    build: ./frontend
+    image: cloudpulse/dashboard:local
+    ports: ["3000:80"]
+    depends_on: [api]
+
+volumes:
+  # Renamed from the midpoint's "postgres-data": the schema is now managed by Flyway, so the
+  # stack starts on a fresh database instead of the midpoint's Hibernate-generated table.
+  cloudpulse-pg:
+  prometheus-data:

@@ -1,0 +1,246 @@
+name: CI
+
+on:
+  push:
+    # The maintenance branches only regenerate the lockfile or screenshots.
+    branches-ignore: ["ci/lockfile", "ci/screenshots"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  backend:
+    name: API · unit + integration tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: backend/pom.xml
+      - name: Build, unit tests, integration tests (Testcontainers PostgreSQL)
+        working-directory: backend
+        run: mvn -B -ntp verify 2>&1 | tee ../backend.log; exit "${PIPESTATUS[0]}"
+      - name: Explain failure
+        if: failure()
+        run: python3 scripts/ci/annotate.py backend.log --title "API build"
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: backend-test-reports
+          path: |
+            backend/target/surefire-reports/*.xml
+            backend/target/failsafe-reports/*.xml
+          if-no-files-found: warn
+
+  demo-service:
+    name: Demo service · unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: demo-service/pom.xml
+      - name: Build and unit tests
+        working-directory: demo-service
+        run: mvn -B -ntp verify 2>&1 | tee ../demo.log; exit "${PIPESTATUS[0]}"
+      - name: Explain failure
+        if: failure()
+        run: python3 scripts/ci/annotate.py demo.log --title "Demo service build"
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: demo-service-test-reports
+          path: demo-service/target/surefire-reports/*.xml
+          if-no-files-found: warn
+
+  frontend:
+    name: Dashboard · type-check, tests, build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install, test, type-check and build
+        working-directory: frontend
+        run: (npm ci && npm test && npm run build) 2>&1 | tee ../frontend.log; exit "${PIPESTATUS[0]}"
+      - name: Explain failure
+        if: failure()
+        run: python3 scripts/ci/annotate.py frontend.log --title "Dashboard build"
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: frontend-test-reports
+          path: frontend/test-results/junit.xml
+          if-no-files-found: warn
+
+  system-test:
+    name: System test · full Docker Compose stack
+    needs: [backend, demo-service, frontend]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build images and start the stack
+        run: |
+          # Image builds download Maven and npm dependencies; retry if a registry rate-limits us (HTTP 429).
+          for attempt in 1 2 3; do
+            docker compose build 2>&1 | tee compose-up.log && [ "${PIPESTATUS[0]}" = 0 ] && break
+            [ "$attempt" = 3 ] && exit 1
+            echo "Image build failed (attempt $attempt); retrying in $((attempt * 60)) s"; sleep $((attempt * 60))
+          done
+          docker compose up -d --wait --wait-timeout 300 2>&1 | tee -a compose-up.log; exit "${PIPESTATUS[0]}"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install Playwright for screenshots
+        # Screenshots are optional: a mirror hiccup here must not skip the tests.
+        continue-on-error: true
+        run: |
+          for attempt in 1 2 3; do
+            python -m pip install --quiet playwright==1.56.0 && python -m playwright install --with-deps chromium && break
+            echo "Playwright install failed (attempt $attempt)"; sleep 30
+          done
+      - name: Inject faults; verify detection, evidence, audit and recovery
+        run: python e2e/smoke_test.py --screenshots --out e2e-results 2>&1 | tee e2e.log; exit "${PIPESTATUS[0]}"
+      - name: The Windows demo check works (verify-demo.ps1 -Quick, PowerShell 7)
+        run: |
+          pwsh -NoProfile -Command '$errors = $null; foreach ($f in Get-ChildItem scripts/*.ps1) { [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$errors) | Out-Null; if ($errors) { $errors; exit 1 } }'
+          pwsh -NoProfile -File scripts/verify-demo.ps1 -Quick 2>&1 | tee verify-demo.log; exit "${PIPESTATUS[0]}"
+      - name: Collect stack logs
+        if: always()
+        run: |
+          mkdir -p e2e-results
+          docker compose ps > e2e-results/compose-ps.txt
+          docker compose logs --no-color > e2e-results/compose.log
+          docker compose logs --no-color --tail 60 api > api-tail.log || true
+      - name: Explain failure
+        if: failure()
+        run: |
+          python3 scripts/ci/annotate.py compose-up.log --title "Stack start"
+          python3 scripts/ci/annotate.py e2e.log --title "System test"
+          python3 scripts/ci/annotate.py verify-demo.log --title "verify-demo.ps1" || true
+          python3 scripts/ci/annotate.py api-tail.log --title "API log tail" --notice
+      - name: Publish summary
+        if: always()
+        run: |
+          cat e2e-results/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+          python3 scripts/ci/annotate.py e2e-results/summary.md --title "System test results" --notice --max-lines 60
+      - name: Upload results, screenshots and logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-results
+          path: e2e-results
+      - name: Stop the stack
+        if: always()
+        run: docker compose down -v
+
+  kubernetes:
+    name: System test · Kubernetes mode (kind) + guarded remediation
+    needs: [backend, demo-service, frontend]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install kind and kubectl if the runner lacks them
+        run: |
+          if ! command -v kind >/dev/null; then
+            curl -fsSLo /tmp/kind https://kind.sigs.k8s.io/dl/v0.29.0/kind-linux-amd64 && sudo install /tmp/kind /usr/local/bin/kind
+          fi
+          if ! command -v kubectl >/dev/null; then
+            curl -fsSLo /tmp/kubectl https://dl.k8s.io/release/v1.33.1/bin/linux/amd64/kubectl && sudo install /tmp/kubectl /usr/local/bin/kubectl
+          fi
+          kind version; kubectl version --client
+      - name: Start CloudPulse with the same script users run
+        run: |
+          for attempt in 1 2 3; do
+            ./scripts/k8s-up.sh 2>&1 | tee k8s-up.log && [ "${PIPESTATUS[0]}" = 0 ] && break
+            [ "$attempt" = 3 ] && exit 1
+            echo "Start failed (attempt $attempt); retrying in $((attempt * 60)) s"; sleep $((attempt * 60))
+          done
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install Playwright for screenshots
+        # Screenshots are optional: a mirror hiccup here must not skip the tests.
+        continue-on-error: true
+        run: |
+          for attempt in 1 2 3; do
+            python -m pip install --quiet playwright==1.56.0 && python -m playwright install --with-deps chromium && break
+            echo "Playwright install failed (attempt $attempt)"; sleep 30
+          done
+      - name: Stuck service, probable source, approval, restart, verified recovery, RBAC
+        run: python e2e/k8s_test.py --screenshots --out e2e-k8s-results 2>&1 | tee k8s.log; exit "${PIPESTATUS[0]}"
+      - name: The Windows demo check works in Kubernetes mode (verify-demo.ps1 -Kubernetes, PowerShell 7)
+        run: pwsh -NoProfile -File scripts/verify-demo.ps1 -Kubernetes 2>&1 | tee verify-demo.log; exit "${PIPESTATUS[0]}"
+      - name: Collect cluster state
+        if: always()
+        run: |
+          mkdir -p e2e-k8s-results
+          kubectl get all,pvc,roles,rolebindings -A -o wide > e2e-k8s-results/cluster.txt 2>&1 || true
+          kubectl get events -A --sort-by=.lastTimestamp > e2e-k8s-results/events.txt 2>&1 || true
+          kubectl -n cloudpulse logs deployment/cloudpulse-api --tail=400 > e2e-k8s-results/api.log 2>&1 || true
+          kubectl -n cloudpulse logs deployment/cloudpulse-api --tail=60 > api-tail.log 2>&1 || true
+      - name: Explain failure
+        if: failure()
+        run: |
+          python3 scripts/ci/annotate.py k8s-up.log --title "Kubernetes start" || true
+          python3 scripts/ci/annotate.py k8s.log --title "Kubernetes system test" || true
+          python3 scripts/ci/annotate.py verify-demo.log --title "verify-demo.ps1 -Kubernetes" || true
+          python3 scripts/ci/annotate.py api-tail.log --title "API log tail" --notice || true
+      - name: Publish summary
+        if: always()
+        run: |
+          cat e2e-k8s-results/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+          python3 scripts/ci/annotate.py e2e-k8s-results/summary.md --title "Kubernetes test results" --notice --max-lines 60 || true
+      - name: Upload results, screenshots and cluster state
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-k8s-results
+          path: e2e-k8s-results
+
+  traceability:
+    name: Requirement traceability matrix
+    needs: [backend, demo-service, frontend, system-test, kubernetes]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v7
+        with:
+          path: reports
+      - name: Build the matrix from real test results
+        run: python3 scripts/traceability_report.py --reports reports --out traceability.md
+      - name: Publish
+        if: always()
+        run: |
+          cat traceability.md >> "$GITHUB_STEP_SUMMARY" || true
+          python3 scripts/ci/annotate.py traceability.md --title "Traceability" --notice --max-lines 60
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: traceability
+          path: traceability.md

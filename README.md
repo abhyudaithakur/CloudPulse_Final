@@ -2,7 +2,7 @@
 
 **Incident detection, probable-source diagnosis and approval-gated Kubernetes remediation for microservices, with the evidence and audit trail to back every decision.**
 
-[![CI](https://github.com/abhyudaithakur/CloudPulse/actions/workflows/ci.yml/badge.svg)](https://github.com/abhyudaithakur/CloudPulse/actions/workflows/ci.yml)
+[![CI](https://github.com/abhyudaithakur/CloudPulse_Final/actions/workflows/ci.yml/badge.svg)](https://github.com/abhyudaithakur/CloudPulse_Final/actions/workflows/ci.yml)
 ![Java 21](https://img.shields.io/badge/Java-21-informational)
 ![Spring Boot 4.1](https://img.shields.io/badge/Spring%20Boot-4.1-informational)
 ![React 19](https://img.shields.io/badge/React-19-informational)
@@ -118,7 +118,7 @@ Windows walkthrough, including the live demo script, is in [SETUP_WINDOWS.md](SE
 ### Docker Compose mode: detect and explain
 
 ```bash
-git clone https://github.com/abhyudaithakur/CloudPulse.git
+git clone https://github.com/abhyudaithakur/CloudPulse_Final.git
 cd CloudPulse
 docker compose up --build -d
 ```
